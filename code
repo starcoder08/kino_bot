@@ -1,0 +1,285 @@
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils import executor
+
+# Tokeningizni o'zgartiring
+BOT_TOKEN = '7338851905:AAETdFktAfvWfkJhLDgLAdzFfSD8eAg2VPY'
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot, storage=MemoryStorage())
+dp.middleware.setup(LoggingMiddleware())
+
+# Adminlarning ID-larini bu yerga qo'shing
+ADMIN_IDS = [7180035195]
+
+# Foydalanuvchilar va adminlar uchun holatlarni aniqlash
+class AdminState(StatesGroup):
+    waiting_for_category_name = State()
+    waiting_for_subcategory_name = State()
+    waiting_for_category_choice = State()
+    waiting_for_deletion_choice = State()
+
+class UploadState(StatesGroup):
+    waiting_for_category = State()
+    waiting_for_subcategory = State()
+    waiting_for_video = State()
+
+categories = {}
+videos = {}
+
+# /start komandasi
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Bo'lim qo'shish", callback_data="add_category"))
+        markup.add(InlineKeyboardButton("Video yuklash", callback_data="upload"))
+        markup.add(InlineKeyboardButton("O'chirish", callback_data="delete"))
+        await message.answer("Admin paneliga xush kelibsiz!", reply_markup=markup)
+    else:
+        markup = InlineKeyboardMarkup()
+        if categories:
+            for category in categories:
+                markup.add(InlineKeyboardButton(category, callback_data=f"user_category:{category}"))
+        else:
+            await message.answer("Hozirda hech qanday bo'lim mavjud emas.")
+            return
+
+        await message.answer("Video bo'limlarini tanlang:", reply_markup=markup)
+
+# Bo'lim qo'shish
+@dp.callback_query_handler(lambda c: c.data == "add_category")
+async def add_category(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Yangi bo'lim nomini kiriting:")
+        await AdminState.waiting_for_category_name.set()
+    else:
+        await bot.answer_callback_query(callback_query.id, "Sizda bu buyruqni bajarish uchun huquq yo'q.", show_alert=True)
+
+@dp.message_handler(state=AdminState.waiting_for_category_name)
+async def receive_category_name(message: types.Message, state: FSMContext):
+    category_name = message.text.strip()
+    if category_name:
+        categories[category_name] = {}
+        videos[category_name] = {}
+        await message.answer(f"Bo'lim '{category_name}' qo'shildi. Ichki bo'lim qo'shish uchun quyidagi buyruqni bajaring.")
+        await bot.send_message(message.from_user.id, "Ichki bo'lim qo'shish uchun /add_subcategory komandasini kiriting.")
+        await state.finish()
+    else:
+        await message.answer("Iltimos, to'g'ri bo'lim nomini kiriting.")
+
+# Ichki bo'lim qo'shish
+@dp.message_handler(commands=['add_subcategory'])
+async def add_subcategory(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        for category in categories:
+            markup.add(InlineKeyboardButton(category, callback_data=f"subcategory_category:{category}"))
+        await message.answer("Qaysi bo'limga ichki bo'lim qo'shmoqchisiz?", reply_markup=markup)
+        await AdminState.waiting_for_category_choice.set()
+    else:
+        await message.answer("Sizda bu buyruqni bajarish uchun huquq yo'q.")
+
+@dp.callback_query_handler(lambda c: c.data.startswith('subcategory_category'), state=AdminState.waiting_for_category_choice)
+async def choose_category_for_subcategory(callback_query: types.CallbackQuery, state: FSMContext):
+    category = callback_query.data.split(':')[1]
+    await state.update_data(chosen_category=category)
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f"{category} bo'limiga yangi ichki bo'lim nomini kiriting:")
+    await AdminState.waiting_for_subcategory_name.set()
+
+@dp.message_handler(state=AdminState.waiting_for_subcategory_name)
+async def receive_subcategory_name(message: types.Message, state: FSMContext):
+    subcategory_name = message.text.strip()
+    if subcategory_name:
+        user_data = await state.get_data()
+        category = user_data['chosen_category']
+        
+        if category not in categories:
+            categories[category] = {}
+            videos[category] = {}
+        
+        categories[category][subcategory_name] = []
+        videos[category][subcategory_name] = []
+        
+        await message.answer(f"Ichki bo'lim '{subcategory_name}' {category} bo'limiga qo'shildi.")
+        await state.finish()
+    else:
+        await message.answer("Iltimos, to'g'ri ichki bo'lim nomini kiriting.")
+
+# Video yuklash
+@dp.callback_query_handler(lambda c: c.data == "upload")
+async def upload_video(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        if not categories:
+            await bot.answer_callback_query(callback_query.id, "Avval bo'lim qo'shishingiz kerak.", show_alert=True)
+            return
+
+        markup = InlineKeyboardMarkup()
+        for category in categories:
+            markup.add(InlineKeyboardButton(category, callback_data=f"upload_category:{category}"))
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Qaysi bo'limga video yuklamoqchisiz?", reply_markup=markup)
+        await UploadState.waiting_for_category.set()
+    else:
+        await bot.answer_callback_query(callback_query.id, "Sizda bu buyruqni bajarish uchun huquq yo'q.", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('upload_category'), state=UploadState.waiting_for_category)
+async def handle_category_for_upload(callback_query: types.CallbackQuery, state: FSMContext):
+    category = callback_query.data.split(':')[1]
+    await state.update_data(chosen_category=category)
+    
+    markup = InlineKeyboardMarkup()
+    for subcategory in categories.get(category, {}):
+        markup.add(InlineKeyboardButton(subcategory, callback_data=f"upload_subcategory:{subcategory}"))
+    
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f"{category} bo'limining ichki bo'limini tanlang:", reply_markup=markup)
+    await UploadState.waiting_for_subcategory.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('upload_subcategory'), state=UploadState.waiting_for_subcategory)
+async def handle_subcategory_for_upload(callback_query: types.CallbackQuery, state: FSMContext):
+    subcategory = callback_query.data.split(':')[1]
+    await state.update_data(chosen_subcategory=subcategory)
+    
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f"{subcategory} ichki bo'limiga video yuklash uchun videoni yuboring.")
+    await UploadState.waiting_for_video.set()
+
+@dp.message_handler(content_types=['video'], state=UploadState.waiting_for_video)
+async def handle_video_upload(message: types.Message, state: FSMContext):
+    if message.from_user.id in ADMIN_IDS:
+        user_data = await state.get_data()
+        category = user_data['chosen_category']
+        subcategory = user_data['chosen_subcategory']
+        
+        if category not in videos:
+            videos[category] = {}
+        if subcategory not in videos[category]:
+            videos[category][subcategory] = []
+        
+        videos[category][subcategory].append(message.video)
+        
+        await message.answer(f"Video {subcategory} ichki bo'limiga yuklandi!")
+
+        await state.finish()
+    else:
+        await message.answer("Sizda bu buyruqni bajarish uchun huquq yo'q.")
+
+# O'chirish
+@dp.callback_query_handler(lambda c: c.data == "delete")
+async def delete_options(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Bo'lim o'chirish", callback_data="delete_category"))
+        markup.add(InlineKeyboardButton("Ichki bo'lim o'chirish", callback_data="delete_subcategory"))
+        markup.add(InlineKeyboardButton("Video o'chirish", callback_data="delete_video"))
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Qanday o'chirishni xohlaysiz?", reply_markup=markup)
+        await AdminState.waiting_for_deletion_choice.set()
+    else:
+        await bot.answer_callback_query(callback_query.id, "Sizda bu buyruqni bajarish uchun huquq yo'q.", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "delete_category", state=AdminState.waiting_for_deletion_choice)
+async def delete_category(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        for category in categories:
+            markup.add(InlineKeyboardButton(category, callback_data=f"confirm_delete_category:{category}"))
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Qaysi bo'limni o'chirmoqchisiz?", reply_markup=markup)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_category'), state=AdminState.waiting_for_deletion_choice)
+async def confirm_delete_category(callback_query: types.CallbackQuery):
+    category = callback_query.data.split(':')[1]
+    if category in categories:
+        del categories[category]
+        del videos[category]
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"'{category}' bo'limi muvaffaqiyatli o'chirildi.")
+    else:
+        await bot.send_message(callback_query.from_user.id, "Tanlangan bo'lim topilmadi.")
+    await AdminState.waiting_for_deletion_choice.set()
+
+@dp.callback_query_handler(lambda c: c.data == "delete_subcategory", state=AdminState.waiting_for_deletion_choice)
+async def delete_subcategory(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        for category in categories:
+            for subcategory in categories[category]:
+                markup.add(InlineKeyboardButton(subcategory, callback_data=f"confirm_delete_subcategory:{category}:{subcategory}"))
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Qaysi ichki bo'limni o'chirmoqchisiz?", reply_markup=markup)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_subcategory'), state=AdminState.waiting_for_deletion_choice)
+async def confirm_delete_subcategory(callback_query: types.CallbackQuery):
+    category, subcategory = callback_query.data.split(':')[1:]
+    if category in categories and subcategory in categories[category]:
+        del categories[category][subcategory]
+        del videos[category][subcategory]
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"'{subcategory}' ichki bo'limi muvaffaqiyatli o'chirildi.")
+    else:
+        await bot.send_message(callback_query.from_user.id, "Tanlangan ichki bo'lim topilmadi.")
+    await AdminState.waiting_for_deletion_choice.set()
+
+@dp.callback_query_handler(lambda c: c.data == "delete_video", state=AdminState.waiting_for_deletion_choice)
+async def delete_video(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup()
+        for category in categories:
+            for subcategory in videos.get(category, {}):
+                for video in videos[category][subcategory]:
+                    markup.add(InlineKeyboardButton(f"{category} - {subcategory}", callback_data=f"confirm_delete_video:{category}:{subcategory}:{video.file_id}"))
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Qaysi videoni o'chirmoqchisiz?", reply_markup=markup)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_video'), state=AdminState.waiting_for_deletion_choice)
+async def confirm_delete_video(callback_query: types.CallbackQuery):
+    category, subcategory, video_id = callback_query.data.split(':')[1:]
+    video_id = int(video_id)  # Telegram video ID-ni integerga aylantiring
+    if category in videos and subcategory in videos[category]:
+        videos[category][subcategory] = [v for v in videos[category][subcategory] if v.file_id != video_id]
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"'{category} - {subcategory}' ichki bo'limidagi video muvaffaqiyatli o'chirildi.")
+    else:
+        await bot.send_message(callback_query.from_user.id, "Tanlangan video topilmadi.")
+    await AdminState.waiting_for_deletion_choice.set()
+
+# Foydalanuvchi bo'limlarni ko'rish
+@dp.callback_query_handler(lambda c: c.data.startswith('user_category'))
+async def user_choose_category(callback_query: types.CallbackQuery):
+    category = callback_query.data.split(':')[1]
+    subcategories = categories.get(category, {})
+    
+    if not subcategories:
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"'{category}' bo'limida ichki bo'limlar mavjud emas.")
+    else:
+        markup = InlineKeyboardMarkup()
+        for subcategory in subcategories:
+            markup.add(InlineKeyboardButton(subcategory, callback_data=f"user_subcategory:{subcategory}"))
+        
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"{category} bo'limining ichki bo'limlarini tanlang:", reply_markup=markup)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('user_subcategory'))
+async def user_choose_subcategory(callback_query: types.CallbackQuery):
+    subcategory = callback_query.data.split(':')[1]
+    category = [cat for cat, subs in categories.items() if subcategory in subs][0]
+    video_list = videos.get(category, {}).get(subcategory, [])
+    
+    if not video_list:
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"'{subcategory}' ichki bo'limida hali video mavjud emas.")
+    else:
+        await bot.answer_callback_query(callback_query.id)
+        for video in video_list:
+            await bot.send_video(callback_query.from_user.id, video.file_id)
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
